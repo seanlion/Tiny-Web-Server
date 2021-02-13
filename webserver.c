@@ -3,22 +3,14 @@ tiny.c
 static and dynamic content 서빙하는 간단한 웹서버.
 */
 
-/* $begin tinymain */
-/*
- * tiny.c - A simple, iterative HTTP/1.0 Web server that uses the 
- *     GET method to serve static and dynamic content.
- *
- * Updated 11/2019 droh 
- *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
- */
 #include "csapp.h"
-void doit(int fd);
+void op_transaction(int fd);
 int read_requesthdrs(rio_t *rp, int log, char *method);
 int parse_uri(char *uri, char *filename, char *cgiargs);
 void serve_static(int fd, char *filename, int filesize, char *method);
 void get_filetype(char *filename, char *filetype);
 void serve_dynamic(int fd, char *filename, char *cgiargs);
-void clienterror(int fd, char *cause, char *errnum, 
+void client_error(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg);
 void echo(int connfd); 
 int main(int argc, char **argv) 
@@ -39,7 +31,7 @@ int main(int argc, char **argv)
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
                     port, MAXLINE, 0);
         printf("Accepted connection from (%s, %s)\n", hostname, port);
-	doit(connfd);                                             //line:netp:tiny:doit
+	op_transaction(connfd);                                             //line:netp:tiny:doit
 	//echo(connfd);
 	Close(connfd);                                            //line:netp:tiny:close
     }
@@ -60,7 +52,7 @@ void echo(int connfd)
  * doit - handle one HTTP request/response transaction
  */
 /* $begin doit */
-void doit(int fd) 
+void op_transaction(int fd) 
 {
     int is_static;
     struct stat sbuf;
@@ -71,11 +63,7 @@ void doit(int fd)
     size_t n;
     /* Read request line and headers */
     Rio_readinitb(&rio, fd);
-    // while((n = Rio_readlineb(&rio, buf, MAXLINE)) !=0){ // rio 파일에서 내용 읽고 buf에 카피
-    //     printf("Request headers:\n");
-    //     printf("내용 : %s",buf);
-    //     Rio_writen(fd,buf,n);
-    // }
+ 
     Rio_readlineb(&rio, buf, MAXLINE);
     printf("Request headers:\n");
     printf("%s", buf);
@@ -85,85 +73,65 @@ void doit(int fd)
     	printf("error");
     }
     Rio_writen(log, buf, n); 
-    //printf("buf from Rio fd: %s",buf);
+    printf("buf from Rio fd: %s",buf);
     sscanf(buf, "%s %s %s", method, uri, version);       //line:netp:doit:parserequest
     if ( !(strcasecmp(method, "GET")==0 || strcasecmp(method, "HEAD")==0 || strcasecmp(method,"POST")==0 ) ) {                     //line:netp:doit:beginrequesterr
-        clienterror(fd, method, "501", "Not Implemented",
+        client_error(fd, method, "501", "Not Implemented",
                     "Tiny does not implement this method");
         return;
     }                                                    //line:netp:doit:endrequesterr
     int param_len = read_requesthdrs(&rio, log, method);
-    printf("paramlen : %d\n",param_len);
     Rio_readnb(&rio,buf,param_len); // content_length만큼 버퍼에 보내기
     /* Parse URI from GET request */
     
     is_static = parse_uri(uri, filename, cgiargs);       
     if (stat(filename, &sbuf) < 0) {                     //line:netp:doit:beginnotfound
-	    clienterror(fd, filename, "404", "Not found",
+	    client_error(fd, filename, "404", "Not found",
 		    "Tiny couldn't find this file");
 	    return;
     }                                                    
     if (is_static) { /* Serve static content */          
 	if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) { //line:netp:doit:readable
-	    clienterror(fd, filename, "403", "Forbidden",
+	    client_error(fd, filename, "403", "Forbidden",
 			"Tiny couldn't read the file");
 	    return;
 	}
-	serve_static(fd, filename, sbuf.st_size, method);        //line:netp:doit:servestatic
+	static_serve(fd, filename, sbuf.st_size, method);        //line:netp:doit:servestatic
     }
     else { /* Serve dynamic content */
 	if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) { //line:netp:doit:executable
-	    clienterror(fd, filename, "403", "Forbidden",
+	    client_error(fd, filename, "403", "Forbidden",
 			"Tiny couldn't run the CGI program");
 	    return;
 	}
     // GET으로 할지 POST로 할지
     if (strcasecmp(method,"GET") == 0)
-        serve_dynamic(fd, filename, cgiargs);            //line:netp:doit:servedynamic
+        dynamic_serve(fd, filename, cgiargs);            //line:netp:doit:servedynamic
     else 
-        serve_dynamic(fd, filename, buf); // buf에 담긴걸 serve_dynamic 함수에 넘긴다.
+        dynamic_serve(fd, filename, buf); // buf에 담긴걸 serve_dynamic 함수에 넘긴다.
     }
 }
 /* $end doit */
-/*
- * read_requesthdrs - read HTTP request headers
- */
+
 /* $begin read_requesthdrs */
 int read_requesthdrs(rio_t *rp, int log, char* method) 
 {
     char buf[MAXLINE];
-    char slen[MAXLINE];
-    int  len=0;
-    char *ptr;
+    int len=0;
     size_t n;
-    // Rio_readlineb(rp, buf, MAXLINE);
-    // printf("%s", buf);
-    // while(strcmp(buf, "\r\n")) {          //line:netp:readhdrs:checkterm
-	// n = Rio_readlineb(rp, buf, MAXLINE);
-	// printf("%s", buf);
-    // 	Rio_writen(log, buf, n);
-    // }
+
     do {
         Rio_readlineb(rp,buf,MAXLINE);
-        printf("%s\n",buf);
-        if (strcasecmp(method,"POST")==0 && strncasecmp(buf,"Content-Length:",15)==0){ // content-length 뒤에 있는거 숫자 가져오기
-            printf("buf: %s\n",buf);
-            ptr = index(buf,':');
-	    ptr+=2;
-	    printf("ptr:%p\n",ptr);
-    	    len=atoi(ptr); 
- 	    //sscanf(buf,"Content-length: %d\n",&len);
-            printf("len:%p,  %d\n",&len,len);
-     }
-    }while(strcmp(buf,"\r\n")); // 버퍼가 한 줄 다 읽을때까지
-    //slen = atoi(len); 
+        printf("%s",buf);
+        if (strcasecmp(method,"POST")==0 && strncasecmp(buf,"Content-Length:",15)==0) // content-length 뒤에 있는거 숫자 가져오기
+            printf("buf: %s",buf);
+            printf("len: %d",len);
+            sscanf(buf,"Content-length: %d",&len);
+    } while(strcmp(buf,"\r\n")); // 버퍼가 한 줄 다 읽을때까지
     return len; // 읽은 길이 리턴
 }
 /* $end read_requesthdrs */
-/*
- * parse_uri - parse URI into filename and CGI args
- *             return 0 if dynamic content, 1 if static
- */
+
 /* $begin parse_uri */
 int parse_uri(char *uri, char *filename, char *cgiargs) 
 {
@@ -190,11 +158,9 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
     }
 }
 /* $end parse_uri */
-/*
- * serve_static - copy a file back to the client 
- */
+
 /* $begin serve_static */
-void serve_static(int fd, char *filename, int filesize, char* method )
+void static_serve(int fd, char *filename, int filesize, char* method )
 {
     int srcfd;
     char *srcp, filetype[MAXLINE], buf[MAXBUF];
@@ -241,11 +207,9 @@ void get_filetype(char *filename, char *filetype)
 	strcpy(filetype, "text/plain");
 }  
 /* $end serve_static */
-/*
- * serve_dynamic - run a CGI program on behalf of the client
- */
+
 /* $begin serve_dynamic */
-void serve_dynamic(int fd, char *filename, char *cgiargs) 
+void dynamic_serve(int fd, char *filename, char *cgiargs) 
 {
     char buf[MAXLINE], *emptylist[] = { NULL };
     /* Return first part of HTTP response */
@@ -255,19 +219,17 @@ void serve_dynamic(int fd, char *filename, char *cgiargs)
     Rio_writen(fd, buf, strlen(buf));
     if (Fork() == 0) { /* Child */ //line:netp:servedynamic:fork
 	/* Real server would set all CGI vars here */
-            setenv("QUERY", cgiargs, 1); //line:netp:servedynamic:setenv
+            setenv("QUERY_STRING", cgiargs, 1); //line:netp:servedynamic:setenv
             // Dup2(fd, STDOUT_FILENO);         /* Redirect stdout to client */ //
-            Dup2(fd, STDOUT_FILENO); 
+            Dup2(fd, STDIN_FILENO); 
             Execve(filename, emptylist, environ); /* Run CGI program */ //line:netp:servedynamic:execve
     }
     Wait(NULL); /* Parent waits for and reaps child */ //line:netp:servedynamic:wait
 }
 /* $end serve_dynamic */
-/*
- * clienterror - returns an error message to the client
- */
+
 /* $begin clienterror */
-void clienterror(int fd, char *cause, char *errnum, 
+void client_error(int fd, char *cause, char *errnum, 
 		 char *shortmsg, char *longmsg) 
 {
     char buf[MAXLINE];
